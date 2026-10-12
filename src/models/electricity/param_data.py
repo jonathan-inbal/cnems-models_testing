@@ -268,13 +268,19 @@ class ParamData:
         match self.elec_config.load_scale_mode:
             case LoadScaleMode.ANNUAL:
                 # build it and filter by region
-                df = scale_load(res_dir).reset_index(drop=True)
+                df = scale_load(
+                    res_dir,
+                    randomize=self.elec_config.randomize,
+                    seed=self.elec_config.random_seed,
+                ).reset_index(drop=True)
                 df = self.filter_dataframe(df, 'region', self.model_sets.region_analyze)
             case LoadScaleMode.END_USE:
                 # build routine uses filtered regions...
                 df = scale_load_with_enduses(
                     res_dir,
                     regions=self.model_sets.region_analyze,
+                    randomize=self.elec_config.randomize,
+                    seed=self.elec_config.random_seed,
                 ).reset_index(drop=True)
             case _:
                 raise NotImplementedError(

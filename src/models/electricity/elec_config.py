@@ -11,7 +11,7 @@ from enum import Enum, unique
 from logging import getLogger
 from pathlib import Path
 
-from pydantic import ValidationError, model_validator
+from pydantic import Field, ValidationError, model_validator
 
 from definitions import PROJECT_ROOT
 from src.common.common_config import ModelConfig
@@ -63,6 +63,9 @@ class ElecConfig(ModelConfig):
     spinning_reserve_required: bool
     ramping_required: bool
     load_scale_mode: LoadScaleMode
+    # SD as a percent of projected growth above base demand (not total load).
+    randomize: float | None = Field(default=None, ge=0, allow_inf_nan=False)
+    random_seed: int | None = Field(default=None, ge=0)
 
     @model_validator(mode='after')
     def check_paths(self):

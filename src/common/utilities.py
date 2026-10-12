@@ -8,6 +8,8 @@ from pathlib import Path
 
 import pandas as pd
 
+from src.common.demand_growth import randomize_annual_scalars, randomize_enduse_increments
+
 # Establish logger
 logger = getLogger(__name__)
 
@@ -41,7 +43,7 @@ def get_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
-def scale_load(data_root):
+def scale_load(data_root, randomize=None, seed=None):
     """Scales the base-year load out to every model year.
 
     Reads in BaseLoad.csv (load for all regions/hours for first year) and LoadScalar.csv (a
@@ -56,6 +58,7 @@ def scale_load(data_root):
     # combine first year baseload data with scalar data for all years
     baseload = pd.read_csv(data_root / 'BaseLoad.csv')
     scalar = pd.read_csv(data_root / 'LoadScalar.csv')
+    scalar = randomize_annual_scalars(scalar, randomize, seed)
     df = pd.merge(scalar, baseload, how='cross')
 
     # scale load in each year by scalar
@@ -71,7 +74,9 @@ def scale_load(data_root):
 
 # TODO:  Simple profiling shows that this function is SUPER slow.  Consider refactor ideas...
 # update to above:  pre-filtering regions makes this much more tolerable.  More to do ?
-def scale_load_with_enduses(data_root: Path, regions: Collection[str]):
+def scale_load_with_enduses(
+    data_root: Path, regions: Collection[str], randomize=None, seed=None
+):
     """Scales the base-year load out to every model year using per-enduse scalars.
 
     Reads in BaseLoad.csv (load for all regions/hours for first year), EnduseBaseShares.csv (the
@@ -94,6 +99,7 @@ def scale_load_with_enduses(data_root: Path, regions: Collection[str]):
 
     # annual incremental growth (percent of eu baseload)
     eus = pd.read_csv(data_root / 'EnduseScalar.csv')
+    eus = randomize_enduse_increments(eus, randomize, seed)
 
     # converts the annual increment to percent of total baseload
     eu = pd.merge(eu, eus, how='left', on='enduse_cat')
@@ -128,6 +134,9 @@ def scale_load_with_enduses(data_root: Path, regions: Collection[str]):
     # creates future load
     load = pd.merge(load, eu, how='left', on=['region', 'hour'])
     load['Load'] = load['Load'] + load['increment']
+    if randomize is not None and float(randomize) > 0:
+        if not load['Load'].notna().all() or (load['Load'] < 0).any():
+            raise ValueError('Growth draw produced invalid load; not clipped/redrawn.')
     load = load[['region', 'year', 'hour', 'Load']]
 
     toc = datetime.now().astimezone()
