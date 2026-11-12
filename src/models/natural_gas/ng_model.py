@@ -630,6 +630,32 @@ class NGModel(ConcreteModel, IntegratedModel):
         # width via supply_step_cap_con.
         self.sstep = Var(self.region_analyze, self.steps, self.year, within=NonNegativeReals)
 
+
+        # TEST OF LINEAR CAPACITY EXPANSION
+
+        # Capacity added in year y, measured in BCF/year.
+        self.expanded_capacity = Var(
+            self.region_analyze, self.year, within=NonNegativeReals
+        )
+
+        # Production from the accumulated expanded capacity, in BCF/year.
+        self.capacity_expansion_production = Var(
+            self.region_analyze, self.year, within=NonNegativeReals
+        )
+
+        # One-time investment cost: dollars per (BCF/year) of added capacity.
+        # Supply a value for every (region, year) before solving.
+        self.capacity_expansion_unit_cost = Param(
+            self.region_analyze,
+            self.year,
+            initialize=15000.0,
+            within=NonNegativeReals,
+            mutable=True,
+            )
+
+
+
+
         # The legacy attribute name
         # ``production`` is intentionally NOT defined.  Pyomo forbids aliasing
         # one Var component to two block attributes, and a grep of the
@@ -650,8 +676,21 @@ class NGModel(ConcreteModel, IntegratedModel):
         # writes the same identity with QMIN, which is consistent because _supply_qbase_at()
         # makes QBASE_1 the committed floor. Reading QBASE_1 here rather than QMIN keeps the
         # identity true of the curve itself rather than of an equality maintained elsewhere.
+
+        #
+        # UPDATED TOTAL PRODUCTON EXPRESSION:  Now includes capacity expansion production
+        #
+
         def _prod_total_rule(m, r, y):
-            return m.q_base[r, 1, y] + quicksum(m.sstep[r, t, y] for t in m.steps)
+            return (
+                m.q_base[r, 1, y]
+                + quicksum(m.sstep[r, t, y] for t in m.steps)
+                + m.capacity_expansion_production[r, y]
+            )
+
+        #
+        # END INSERT
+        #
 
         self.production_total = Expression(self.region_analyze, self.year, rule=_prod_total_rule)
 
@@ -737,6 +776,24 @@ class NGModel(ConcreteModel, IntegratedModel):
             self.year,
             rule=supply_step_cap_rule,
         )
+
+        #
+        # LINEAR CAPACITY EXPANSION CONSTRAINTS
+        #
+
+        def expanded_capacity_limit_rule(m, r, y):
+            return m.capacity_expansion_production[r, y] <= quicksum(
+                m.expanded_capacity[r, build_year]
+                for build_year in m.year
+                if build_year <= y
+            )
+
+        self.expanded_capacity_limit = Constraint(
+            self.region_analyze,
+            self.year,
+            rule=expanded_capacity_limit_rule,
+        )
+
 
         # Backward-compat: total production must not exceed Σ_k segment widths
         # plus QMIN, automatically implied by supply_step_cap above, but kept
@@ -1071,6 +1128,18 @@ class NGModel(ConcreteModel, IntegratedModel):
         #
         # Only prod_cost, transport_cost and lng_consumer_surplus carry quadratic terms;
         # committed_cost is a constant and the other blocks are linear.
+
+        #
+        # LINEAR CAPACITY EXPANSION COSTS
+        #
+
+        expansion_investment_cost = quicksum(
+            self.capacity_expansion_unit_cost[r, y]
+            * self.expanded_capacity[r, y]
+            for r in self.region_analyze
+            for y in self.year
+        )
+
         self.total_cost = Objective(
             expr=(
                 prod_cost
@@ -1081,6 +1150,7 @@ class NGModel(ConcreteModel, IntegratedModel):
                 + storage_cost
                 - lng_consumer_surplus
                 + unserved_cost
+                + expansion_investment_cost
             ),
             sense=minimize,
         )

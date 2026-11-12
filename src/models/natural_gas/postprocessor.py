@@ -83,6 +83,18 @@ def _extract_production(m: NGModel) -> pd.DataFrame:
                         'cost_per_mmbtu': value(m.p_base[r, 1, y]),
                     }
                 )
+        for y in m.year:
+            rows.append(
+                {
+                    'region': r,
+                    'supply_source': 'expanded_capacity',
+                    'year': y,
+                    'production_bcf': value(
+                        m.capacity_expansion_production[r, y]
+                    ),
+                    'cost_per_mmbtu': None,
+                }
+            )
     return pd.DataFrame(rows)
 
 
