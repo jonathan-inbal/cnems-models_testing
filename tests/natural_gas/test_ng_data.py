@@ -719,6 +719,39 @@ class TestDemandGrowthGating:
         )
         assert demand[('mountain', 'electric_power', 2030)] == pytest.approx(100.0 * 1.10**5)
 
+    def test_growth_bump_adds_to_every_sector_and_region(self) -> None:
+        """A uniform annual bump compounds from the base year for every demand series."""
+        demand = ng_data.project_demand(
+            self.BASE,
+            self.GROWTH,
+            self.YEARS,
+            ['mountain', 'pacific'],
+            self.SECTORS,
+            growth_bump=0.01,
+        )
+
+        for region in ('mountain', 'pacific'):
+            for sector in self.SECTORS:
+                base = self.BASE[region][sector]
+                rate = self.GROWTH[sector] + 0.01
+                assert demand[(region, sector, 2025)] == pytest.approx(base)
+                assert demand[(region, sector, 2030)] == pytest.approx(base * (1 + rate) ** 5)
+
+    def test_growth_bump_does_not_change_superseded_sector(self) -> None:
+        """Inbound-package sectors remain flat even when other sectors get a growth bump."""
+        demand = ng_data.project_demand(
+            self.BASE,
+            self.GROWTH,
+            self.YEARS,
+            ['mountain'],
+            self.SECTORS,
+            superseded={'electric_power'},
+            growth_bump=0.01,
+        )
+
+        assert demand[('mountain', 'electric_power', 2030)] == pytest.approx(100.0)
+        assert demand[('mountain', 'industrial', 2030)] == pytest.approx(50.0 * 1.06**5)
+
     def held_data(self) -> dict:
         """Projected demand for mountain and pacific, the superseded sector held flat."""
         regions = ['mountain', 'pacific']
@@ -787,6 +820,7 @@ class TestDemandGrowthGating:
                 ['mountain'],
                 self.SECTORS,
                 superseded={'electric_power', 'hydrogen'},
+                growth_bump=0.01,
             )
         # the known sector is still gated; the unknown one is named in a warning
         assert demand[('mountain', 'electric_power', 2030)] == pytest.approx(100.0)

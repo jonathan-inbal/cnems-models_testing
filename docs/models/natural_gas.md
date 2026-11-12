@@ -309,6 +309,11 @@ the values a run solves on are always the values on disk. The two exceptions are
 | `ng_scalars.csv` | parameter, value, units, source | storage opex, LNG world price, defaults |
 | `elec_to_ng_region_map.csv` | elec_region, ng_region | one-to-one region map the population-weighted crosswalk is built from |
 
+An optional `growth_bump` under `[natural_gas]` adds the same annual growth-rate adjustment to
+every sector's `annual_growth_rate` in `ng_demand_growth.csv`, across all regions. Rates are
+fractions, so `growth_bump = 0.01` adds one percentage point. It defaults to zero. The 2025 base
+year is unchanged, and sectors superseded by inbound demand packages remain flat.
+
 ### Cost tiers in the input are not NGMM steps
 
 `ng_supply_cost_tiers.csv` describes each region with a three-tier cost structure:

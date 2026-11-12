@@ -931,13 +931,15 @@ def project_demand(
     regions: list[str],
     sectors: list[str],
     superseded: Collection[str] = (),
+    growth_bump: float = 0.0,
 ) -> dict[tuple[str, str, int], float]:
     """Project sector demand for each region and year using AEO growth rates.
 
-    Applies ``base * (1 + growth) ** (year - 2025)`` per region and sector, so 2025 returns the
-    base-year value unchanged.  A sector in ``superseded`` is held flat at its base-year value
-    instead:  an inbound update package is about to set it, so growing it first would only put a
-    misleading number under any ``(region, year)`` the package fails to cover.
+    Applies ``base * (1 + growth + growth_bump) ** (year - 2025)`` per region and sector, so 2025
+    returns the base-year value unchanged. ``growth_bump`` is an additive annual rate (for example,
+    ``0.01`` adds one percentage point). A sector in ``superseded`` is held flat at its base-year
+    value instead: an inbound update package is about to set it, so growing it first would only put
+    a misleading number under any ``(region, year)`` the package fails to cover.
 
     Parameters
     ----------
@@ -954,12 +956,18 @@ def project_demand(
         Sectors to project. Every one must appear in ``growth_rate_table``.
     superseded : Collection[str], optional
         Sectors whose growth is gated off; see ``NGUpdateReader.superseded_sectors``.
+    growth_bump : float, optional
+        Additive annual growth-rate adjustment applied uniformly to all non-superseded sectors.
+        Defaults to zero.
 
     Returns
     -------
     dict[(region, sector, year), float]
         Projected demand in BCF/year.
     """
+    if not math.isfinite(growth_bump):
+        raise ValueError(f'growth_bump must be finite; got {growth_bump!r}')
+
     base_year = 2025
     demand: dict[tuple[str, str, int], float] = {}
     gated = [sector for sector in sectors if sector in superseded]
@@ -979,7 +987,7 @@ def project_demand(
     for region in regions:
         for sector in sectors:
             base = demand_table[region][sector]
-            g = 0.0 if sector in superseded else growth_rate_table[sector]
+            g = 0.0 if sector in superseded else growth_rate_table[sector] + growth_bump
             for year in years:
                 dt = year - base_year
                 demand[(region, sector, year)] = base * ((1 + g) ** dt)
@@ -1069,6 +1077,7 @@ def load_all(
         regions=region_data['regions_analyze'],
         sectors=sectors,
         superseded=superseded,
+        growth_bump=ng_config.growth_bump,
     )
 
     return {

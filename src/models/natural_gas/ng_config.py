@@ -10,7 +10,7 @@ import tomllib
 from logging import getLogger
 from pathlib import Path
 
-from pydantic import ValidationError, model_validator
+from pydantic import Field, ValidationError, model_validator
 
 from definitions import PROJECT_ROOT
 from src.common.common_config import ModelConfig
@@ -23,6 +23,11 @@ class NGConfig(ModelConfig):
 
     input_path: Path
     region_filter: list[str] | None = None
+    growth_bump: float = Field(
+        default=0.0,
+        allow_inf_nan=False,
+        description='Additive annual demand-growth rate applied to every non-superseded sector.',
+    )
 
     @model_validator(mode='after')
     def check_paths(self):

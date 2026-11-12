@@ -36,7 +36,13 @@ there are no command-line flags. Everything is set in `run_configs/basic_ng_conf
 |---|---|
 | years | `summary_years` under `[common]` |
 | region subset | `region_filter` under `[natural_gas]` |
+| demand-growth adjustment | `growth_bump` under `[natural_gas]` |
 | output location | `output_path` and `scenario_name` under `[common]` |
+
+`growth_bump` is an additive annual growth-rate adjustment applied uniformly to every region and
+sector. For example, `growth_bump = 0.01` adds one percentage point to each rate in
+`ng_demand_growth.csv`. It defaults to `0.0`; demand in the 2025 base year is unchanged, and
+sectors superseded by inbound demand packages remain flat.
 
 To force a solver, call `NGSequencer.solve_model(solver_name='highs')` rather than letting it
 probe. `'highs'` and `'appsi_highs'` are not interchangeable -- see the solver note below.
