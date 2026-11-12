@@ -2,10 +2,10 @@
 
 An integrated run solves several models repeatedly, passing results between them after each
 round, so that each model's inputs reflect the other models' latest solutions: gas prices in the
-electricity model, electricity-sector gas burn in the natural gas model, and so on. The only
-integrated driver today is `JacobiIterator` in `src/integrator/jacobi/jacobi_iterator.py`, a
-subclass of the `IterativeSequencer` base class (`src/common/iterative_sequencer.py`). It runs
-through `main.py` with a config whose `[common]` mode is `"integrated jacobi"`:
+electricity model, electricity-sector gas burn in the natural gas model, and so on. The main
+integrated driver is `JacobiIterator` in `src/integrator/jacobi/jacobi_iterator.py`, a
+subclass of the `IterativeSequencer` base class (`src/common/iterative_sequencer.py`); an
+experimental Gauss-Seidel driver is described [below](#gauss-seidel-iteration-experimental). The first runs through `main.py` with a config whose `[common]` mode is `"integrated jacobi"`:
 
 ```sh
 pixi shell
@@ -14,9 +14,9 @@ pixi run jacobi      # runs run_configs/jacobi_small.toml, a reduced run
 ```
 
 The run config holds a `[common]` section plus one section per participating model
-(`[elec_config]`, `[natural_gas]`, and optionally `[magic_config]`). The `[common]`
-`models_to_run` list selects the models; `all` selects every model except the dev/test MAGIC
-model, which runs only when named explicitly.
+(`[elec_config]`, `[natural_gas]`, `[magic_hsm]`, and optionally `[magic_config]`). The
+`[common]` `models_to_run` list selects the models; `all` selects every model except the test
+models MAGIC and MAGIC_HSM, which run only when named (for example `['all', 'magic_hsm']`).
 
 ### Iterator Settings
 
@@ -31,14 +31,61 @@ created. Every key is required, and an unknown key is an error:
 | `convergence_iterations` | How many consecutive stable iterations end the run                         |
 | `worker_processes`       | Size of the worker pool the models solve in                                |
 | `monitor_delta_mode`     | How the monitor shows objective changes: `absolute`/`percent`              |
+| `exchanges`              | The update packages the models exchange, by package class name             |
+
+### Exchanges and Region Crosswalks
+
+`exchanges` is the standard set of update packages a run may carry, named by class
+(`PACKAGE_TYPES` in `src/common/update_package/update_package.py`). At the start of a run,
+`ExchangeSpec.build` keeps each package whose sender and receivers are all selected. The rest
+are left out, and one warning names them. It also loads the region crosswalks between the
+selected models (`CrosswalkSet` in `src/integrator/region_crosswalk.py`), checking each pair's
+two files once: weights finite, non-negative and summing to 1 per source region, and the same
+links both ways.
+
+The spec is handed to each model's sequencer: in the `IterationCall` for Jacobi workers, at
+construction for Gauss-Seidel. Each writer builds only its model's share of the exchanges, so a
+standalone run, or a model with nothing to send, writes nothing.
+
+Region filters are allowed only when the filtered regions are closed under the crosswalk: every
+region one model reaches must draw solely on regions the other model carries. For example,
+electricity region `7` with gas region `new_england` is closed. A partial pairing fails on the
+first exchange.
+
+#### Region Coverage Rules
+
+Any data that crosses between two models' regions follows these rules. Rules 1 and 2 are checked
+once per run, when the crosswalk is built. Rules 3 to 6 are checked on every exchange, against the
+built models. Each model checks only its own side, so no step needs to know both models' regions.
+
+| # | Rule | Checked in | Builders' obligation |
+|:--|:-----|:-----------|:---------------------|
+| 1 | Each file's weights are finite and ≥ 0, and each source region's weights sum to 1 | `RegionCrosswalk` construction | Crosswalk files: supply one file per direction, each normalized over its own source regions |
+| 2 | The two files name the same regions and the same positive-weight links | `RegionCrosswalk` construction | Crosswalk files: a link is in both files or in neither |
+| 3 | The values sent are exactly the sending model's regions (`IntegratedModel.regions`), with one value per region for each year sent, and every region known to the crosswalk. The years are taken from the values; rule 5 checks them against the receiver | `RegionCrosswalk.apply`, called by the writer | Writer: map through `apply(..., model_regions=model.regions)`; send 0.0 rather than leaving a region out |
+| 4 | The sent regions are closed: every destination region they reach draws only on regions that were sent | `RegionCrosswalk.apply`, called by the writer | Writer: nothing beyond rule 3; `apply` checks it |
+| 5 | The `(region, year)` entries received are exactly the receiving model's regions × years | The reader's handler, via `check_region_year_keys` | Reader: call `check_region_year_keys` before writing anything, in both the pre-build and built-model handlers |
+| 6 | Every key an update names is carried by the receiving model: a domestic region it solves, an international partner it trades with, and a year it holds | The model's update methods (e.g. `set_external_demand`, `update_pipeline_trade`) | Model: check the whole batch before writing anything, and raise on an unrecognized key rather than skipping it |
+
+Every check raises `ValueError` rather than warning: a package that doesn't line up is an error,
+never a partial update. Rules 3 to 5 together prove that the regions both models carry are closed
+under the crosswalk. With no region filters, that means full coverage.
+
+!!! warning "Updates for regions a model doesn't include fail the run"
+    An update naming a region the receiving model doesn't include stops the run with a
+    `ValueError`: during the build on the pre-build path, or at the update on the built-model path.
+    This holds for domestic regions dropped by a region filter and for international partners
+    missing from the model's region file. International partners are not in the crosswalk, so
+    rules 3 to 5 don't cover them, and rule 6 is their only runtime check. Before sending trade
+    data, make sure the receiving model's region file names every partner the data uses.
 
 ## Jacobi Iteration
 
 `jacobi_iterator.py` couples the models with **Jacobi-style** iteration. Every selected model
 solves in the same iteration, in parallel. The *circuit* is the selected models in a fixed order,
 which sets the order packages are routed and applied in, so results are deterministic. By default
-it is alphabetical by `ModelType` key (`DEFAULT_CIRCUIT`: electricity, magic, natural gas);
-`JacobiIterator.run(..., circuit=...)` overrides it. Each model
+it is alphabetical by `ModelType` key (`DEFAULT_CIRCUIT`: electricity, magic, magic HSM, natural
+gas); `JacobiIterator.run(..., circuit=...)` overrides it. Each model
 sees only the results the others sent at the end of the *previous* iteration. (In a Gauss-Seidel
 scheme, by contrast, the models would solve one after another, and each would see results from
 the models ahead of it in the same iteration.) Jacobi iteration lets the models run
@@ -53,6 +100,7 @@ flowchart TD
         E["Electricity<br/><code>full_run</code>"]
         N["Natural gas<br/><code>full_run</code>"]
         M["Magic<br/><code>full_run</code>"]
+        H["Magic HSM<br/><code>full_run</code>"]
     end
     P --> R["Collect <code>IterationResult</code>s<br/>status, objective, outbound packages"]
     R --> V["Record objectives<br/>print the monitor block"]
@@ -71,11 +119,16 @@ Within one iteration, each worker runs its model's `IntegratedModelSequencer.ful
 3. `get_objective_value()` and `get_outbound_updates()`: returned to the control process as an
    `IterationResult`.
 
+Steps 2 and 3 are `solve_iteration()`, which a driver that keeps its models calls after
+`update_model` instead of rebuilding.
+
 Things to know about the current loop:
 
 - **Iteration 1 starts with no packages**, so every model begins from its input files alone.
-- **Models are rebuilt every iteration.** `update_model` is not implemented yet, so a new model
-  instance is built from the inputs plus the latest packages each time.
+- **Models are rebuilt every iteration.** A new model instance is built from the inputs plus the
+  latest packages each time. `update_model` can instead apply packages to a model that is already
+  built, writing the fuel cost change implied by the gas price to `ng_fuel_adj` and the gas burn
+  to the gas model's owned demand cells, but the Jacobi loop does not use it.
 - **Each model logs to its own file.** Like a standalone run, the control process claims a fresh
   `<output_path>/<scenario_name>` folder, suffixed `_1`, `_2`, ... if it is taken, so a rerun never
   mixes with an earlier run's logs. Each worker writes a per-model log there
@@ -83,23 +136,91 @@ Things to know about the current loop:
   monitor to the console.
 - **No result files are written yet.** `full_run` doesn't call `full_postprocess`, so the scenario
   folder ends up holding only `MAIN.log` and the per-model logs (`electricity.log`,
-  `natural_gas.log`, plus `magic.log` when MAGIC runs). The objective plot is shown but not saved.
+  `natural_gas.log`, plus `magic.log` or `magic_hsm.log` when MAGIC or MAGIC_HSM runs). The
+  objective plot is shown but not saved.
 - **The run ends** when every model with an objective has changed by less than `epsilon`,
   relative to its previous objective, for `convergence_iterations` consecutive iterations, or when
   `iteration_limit` is reached (`ConvergenceTracker` in `jacobi/convergence.py`). The relative
   change makes the test independent of each model's objective scale. Models without an objective
-  (MAGIC) are left out. A model whose status is outside `ALLOW_TERMINATION` (`BEST`, `USABLE`)
-  holds the run open: a failed solve, or a `PENALTY` solve, whose results are accurate but lean on
-  a soft limit such as unmet demand. `main.py` then plots each model's objective by iteration; the
-  plot window blocks until it is closed.
+  (MAGIC, MAGIC_HSM) are left out. A model whose status is outside `ALLOW_TERMINATION` (`BEST`,
+  `USABLE`) holds the run open: a failed solve, or a `PENALTY` solve, whose results are accurate
+  but lean on a soft limit such as unmet demand. `main.py` then plots each model's objective by
+  iteration; the plot window blocks until it is closed.
 
 !!! warning "Region filters in integrated runs"
 
-    A model that is filtered to a subset of regions only sends packages covering the other
-    model's regions that overlap its own. It also ignores inbound entries for regions it doesn't
-    hold. The receiving model keeps loaded (base-year) values wherever coverage is missing, so
-    filtering either model can give odd results in an integrated run. `jacobi_iterator.py` logs a
-    warning when either model is filtered.
+    Filter the coupled models only to sets of regions that cover each other exactly, such as
+    electricity `7` with gas `new_england`. Any other filter fails the region coverage rules on the
+    first exchange (see [Region Coverage Rules](#region-coverage-rules)). With the shipped
+    crosswalk the only such sets are that pair, everything else, and both together. On its own,
+    New England loses its pipeline supply, and its production and LNG imports fall well short of
+    its demand, so it solves only with unserved demand. That makes it a test of the mechanics
+    rather than a model run.
+
+## Gauss-Seidel Iteration (experimental)
+
+`GaussSeidelIterator` in `src/integrator/gauss_seidel/gs_iterator.py` is a second
+`IterativeSequencer`. It runs electricity with natural gas, Magic HSM with natural gas, or all three
+(`GS_RUNS`), through `main.py` with `[common]` mode `"integrated gs"`:
+
+```sh
+pixi shell
+python main.py run_configs/gs_compare.toml
+pixi run gs            # the same
+pixi run gs-compare    # Jacobi and Gauss-Seidel on that config, side by side
+```
+
+It differs from the Jacobi iterator in how the models are run, not in what they exchange:
+
+- The models are built once and held. Each iteration applies the inbound packages to the
+  built models with `update_model` and re-solves them with `solve_iteration`, and each model keeps
+  its solver between solves. Magic HSM has no solver; an update sets its held hub price.
+- The models solve in turn, Magic HSM, then electricity, then gas (`GS_ORDER`), so gas sees that
+  iteration's capacity and burn.
+- Region coverage is checked by the writers and readers, as for Jacobi (see *Exchanges and
+  Region Crosswalks*). A run whose regions are not closed under the crosswalk fails on the first
+  exchange.
+- Result files are written at the end for each model whose last solve did not fail.
+
+Packages, the crosswalk, routing (`route_updates`), the stopping rule (`ConvergenceTracker`) and
+the monitor are the Jacobi iterator's. The rest of the per-iteration bookkeeping (the resend rule,
+logging, the monitor display and the final status) is in `../../src/integrator/bookeeping_utilities.py`, which
+both iterators call. The number in brackets on each monitor arrow is how many
+entries the package carries, for example `[18]` for 9 gas regions by 2 years. Under each
+iteration's block, the Gauss-Seidel iterator adds a line with the values behind them: the total
+burn and the mean gas price by year, and with Magic HSM its national capacity and the hub price by
+year. The settings are in `src/integrator/gauss_seidel/gs_config.toml`: the same stopping keys as
+Jacobi's, `monitor_delta_mode`, and `exchanges`.
+
+`python -m analysis_tools.compare_iterators <config>` runs both iterators on one config at the
+same settings, and writes a side-by-side table to the output folder.
+
+## Magic HSM and Natural Gas
+
+[Magic HSM](../models/magic_hsm.md), a test model, couples to C-NGMM with one package each way:
+
+- Magic HSM sends gas production capacity by gas region and summary year
+  (`HSMSupplyCapacityPackage`). C-NGMM sets its supply anchor Q0 to it, keeps its price anchor
+  P0, and rebuilds its supply curve.
+- C-NGMM sends the price of West South Central, the region that holds Henry Hub, by summary year
+  (`NGHubPricePackage`). Magic HSM's capacity follows it.
+
+Both iterators run the pair, with or without electricity:
+
+```sh
+pixi shell
+python main.py run_configs/gs_magic_hsm_ng.toml        # Magic HSM and gas, Gauss-Seidel
+python main.py run_configs/jacobi_magic_hsm_ng.toml    # Magic HSM and gas, Jacobi
+python main.py run_configs/gs_magic_hsm_elec_ng.toml   # gs_compare.toml plus Magic HSM
+```
+
+Magic HSM has no objective, so a run of the pair stops on C-NGMM's. Before any build,
+`check_model_configs` refuses a run of the pair with:
+
+- a `[natural_gas] region_filter`: Magic HSM sends every domestic gas region;
+- a `[magic_hsm] ng_input_path` other than `[natural_gas] input_path`;
+- a `[magic_hsm] reference_dollar_year` other than `PRICE_DOLLAR_YEAR` in
+  `src/models/natural_gas/constants.py`.
 
 ## Inter-model Communication
 
@@ -123,16 +244,18 @@ flowchart LR
 - **Writing.** Each model has an `UpdatePackageWriter` (`update_writer.py`) that turns its solved
   model into outbound packages. The sequencer only calls it after a usable solve: one whose
   status is in `ALLOW_OUTBOUND_UPDATES` (`BEST`, `USABLE`, or `PENALTY`). After a failed
-  solve, the model sends nothing new; `jacobi_iterator.py` resends that model's last accepted packages
-  instead, so its receivers keep seeing its last good solution. Only a model that has never
+  solve, the model sends nothing new; the control loop resends that model's last accepted packages
+  instead (`accept_packages` in `bookeeping_utilities.py`, which both iterators use), so its receivers keep seeing its last good solution. Only a model that has never
   solved usably leaves its receivers on their loaded values.
-- **Routing.** `route_updates` in `jacobi_iterator.py` delivers every package to each receiver in the
-  circuit. A receiver outside the circuit gets nothing, and a warning is logged.
+- **Routing.** `route_updates` (`src/common/update_package/routing.py`) delivers every package to
+  each receiver in the circuit. Each receiver gets its packages grouped by sender, senders in
+  circuit order, so the order they are applied in is fixed. A receiver outside the circuit gets
+  nothing, and a warning is logged.
 - **Reading.** Each model has an `UpdatePackageReader` (`update_reader.py`) that applies inbound
   packages to the model's loaded data *before* the model is built. It picks a handler by package
   type; a type with no registered handler raises an error. Handlers update individual parameters
-  in place: they replace or scale the matching entries, keep loaded values for any entries a
-  package does not cover, and log warnings about gaps and large changes.
+  in place, replacing or scaling the matching entries, and log warnings about large changes. A
+  regional package must cover exactly the receiver's regions and years (rule 5 above).
 
 The packages exchanged today:
 
@@ -140,6 +263,8 @@ The packages exchanged today:
 |:-----------------|:----------------------------|:------------------|:-----------------------------------------------------------------------------------|
 | NG Demand        | `NGElectricalDemandPackage` | Electricity → NG  | Replaces `electric_power` sector gas demand; that sector's growth projection is switched off |
 | NG Prices        | `NGPricePackage`            | NG → Electricity  | Scales the supply price of gas-linked techs with the regional gas price             |
+| HSM Capacity     | `HSMSupplyCapacityPackage`  | Magic HSM → NG    | Sets Q0 by gas region and year; the supply curve is rebuilt                         |
+| Hub Price        | `NGHubPricePackage`         | NG → Magic HSM    | Sets the hub price that Magic HSM's capacity follows                                |
 | Elec Price Scaler | `ElectricityPriceScaler`   | Magic → Electricity | Mock: scales supply prices of named techs                                        |
 | NG Demand Scaler | `NGDemandScaler`            | Magic → NG        | Mock: scales all gas demand                                                        |
 
@@ -181,8 +306,24 @@ written to the `MAIN` log.
 ### Adding a Package Type
 
 1. Define the dataclass in `src/common/update_package/update_package.py`, with validation in
-   `__post_init__`.
-2. Register a handler for it on the receiving model's reader.
-3. Produce it in the sending model's writer.
+   `__post_init__`, and give it a `sender` class attribute.
+2. Decorate it with `@register_package`, which adds it to `PACKAGE_TYPES`.
+3. Add a builder for it to the sending model's writer (`builders`). If the payload is regional,
+   map it with `RegionCrosswalk.apply` (rules 3 and 4).
+4. Register a handler for it on the receiving model's readers, both pre-build and built-model. If
+   the payload is regional, call `check_region_year_keys` first (rule 5). The model method the
+   handler calls must reject unrecognized keys rather than skip them (rule 6).
+5. Name it in `exchanges` in the iterator configs that should carry it.
 
 Routing needs no changes, because it goes by each package's `receivers`.
+
+### Adding a Model Pair to the Crosswalk
+
+1. Add the two files, one normalized over each model's regions, to
+   `input/integrator/population_weighted_region_xwalk/`, or alongside them.
+2. Register the pair in `REGION_CROSSWALKS`, and each model's region-id column in `REGION_COLUMN`
+   (`src/integrator/region_crosswalk.py`).
+3. Implement `IntegratedModel.regions` on each model.
+
+The files must pass rules 1 and 2. `CrosswalkSet.for_models` loads the pair whenever both models
+run.

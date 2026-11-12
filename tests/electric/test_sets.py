@@ -8,6 +8,7 @@ import pytest
 
 from definitions import PROJECT_ROOT
 from src.common.common_config import CommonConfig
+from src.integrator.utilities import create_temporal_mapping
 from src.models.electricity.elec_config import ElecConfig
 from src.models.electricity.model_sets import ModelSets, _parse_steps
 from src.models.electricity.param_data import ParamData
@@ -16,19 +17,35 @@ from src.models.electricity.utilities import annual_count
 logger = getLogger(__name__)
 
 
-def test_sets(unsolved_model):
-    """Test to ensure the years set is injested properly."""
-    common_config, _, elec_model = unsolved_model
+def test_sets(mini_data, build_mini):
+    """The model carries the configured years, and its time weights follow the crosswalk.
 
-    # check that the years are set correctly
-    config_years = common_config.summary_years
+    Day 2 of the mini model has day weight 3 and hour weight 2, so its two hours count 3 x 2 = 6
+    each, while day 1's keep unit weights and count 1.
+    """
+    cw = mini_data.cw_temporal
+    day_2 = cw['Map_day'] == 2
+    cw.loc[day_2, 'WeightDay'] = 3.0
+    cw.loc[day_2, 'WeightHour'] = 2.0
+    _, elec_model = build_mini()
 
-    assert not common_config.aggregate_years, 'aggregate_years should be False in test case'
-    assert elec_model.year == config_years, 'years in model do not match config'
+    assert list(elec_model.year) == mini_data.years, 'years in model do not match config'
+    assert {hr: annual_count(hr, elec_model) for hr in elec_model.hour} == {
+        1: 1.0,
+        2: 1.0,
+        3: 6.0,
+        4: 6.0,
+    }
 
-    # Assert the years in this non-aggregated base model match the settings
-    # Assert the weighted sum of hours is 8760
-    assert sum(annual_count(t, elec_model) for t in elec_model.hour) == 8760, (
+
+@pytest.mark.parametrize('temporal_resolution', ['default', 'd6h12', 'd4h24'])
+def test_temporal_mapping_covers_a_year(temporal_resolution: str):
+    """Each shipped temporal crosswalk maps all 8760 hours, and its weights add back to 8760."""
+    cw = create_temporal_mapping(temporal_resolution)
+
+    assert sorted(cw['hour']) == list(range(1, 8761))
+    rep_hours = cw.drop_duplicates('Map_hour')
+    assert (rep_hours['WeightDay'] * rep_hours['WeightHour']).sum() == 8760, (
         'Annualized hours do not add up!'
     )
 
@@ -64,12 +81,12 @@ def test_hours_set():
 
     # total load for 4 days, 24 hours per day
     tot_load_d4h24 = get_tot_load('d4h24')
-    # total load for 8 days, 12 hours per day
-    tot_load_d8h12 = get_tot_load('d8h12')
+    # total load for 6 days, 12 hours per day
+    tot_load_d6h12 = get_tot_load('d6h12')
 
     # check that sum of load matches regardless of hours per day
     assert tot_load_d4h24 > 0.0, 'no load discovered.  check test setup'
-    assert tot_load_d4h24 == pytest.approx(tot_load_d8h12), (
+    assert tot_load_d4h24 == pytest.approx(tot_load_d6h12), (
         'some diff in load calculated via different hour mappings'
     )
 
@@ -101,16 +118,17 @@ def test_parse_steps_rejects_non_integers(raw: str):
 
 
 def test_tech_steps_matches_supply_curve(config_set):
-    """Every tech's declared steps match the steps actually present in SupplyCurve.csv."""
+    """Every tech's declared steps match the steps actually present in available_capacity.csv."""
     common_config, elec_config = config_set
     model_sets = ModelSets(common_config, elec_config)
 
-    supply_curve = pd.read_csv(
-        Path(PROJECT_ROOT, 'input/electricity/cem_inputs/SupplyCurve.csv'),
+    available_capacity = pd.read_csv(
+        Path(PROJECT_ROOT, 'input/electricity/parameters/available_capacity.csv'),
         dtype={'tech': str},
     )
     observed = {
-        tech: sorted(set(grp['step'])) for tech, grp in supply_curve.groupby('tech', sort=False)
+        tech: sorted(set(grp['step']))
+        for tech, grp in available_capacity.groupby('tech', sort=False)
     }
 
     assert model_sets.tech_steps, 'no tech steps parsed.  check test setup'

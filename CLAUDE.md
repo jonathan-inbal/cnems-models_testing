@@ -35,7 +35,7 @@ pixi run format
 # Run a single test file / test — enter the env, then call pytest directly
 pixi shell
 pytest tests/electric/test_basic_run.py -q
-pytest tests/electric/test_basic_run.py::test_linear_learning -q
+pytest tests/electric/learning/test_learning_linear.py::test_linear_learning -q
 
 # Run the model standalone (new config path; __main__ runs the run_configs/*.toml scenarios)
 pixi shell
@@ -95,6 +95,38 @@ monitor also screen results against. `ALLOW_TERMINATION` (`{BEST, USABLE}`) is t
 an iterative run may stop on; `PENALTY` (accurate, but leaning on a soft limit) sends updates but
 keeps the run going.
 
+#### Region coverage contract (readers, writers, crosswalks)
+
+Regional data crossing between models follows six rules. The authoritative statement is the
+*Region Coverage Rules* section of `docs/run_modes/integrated.md`; this is a summary.
+
+1. Each crosswalk file's weights are finite, ≥ 0, and sum to 1 per source region
+   (`RegionCrosswalk` construction, once per run).
+2. The two files of a pair name the same regions and the same positive-weight links
+   (`RegionCrosswalk` construction, once per run).
+3. A writer sends exactly its own model's regions (`IntegratedModel.regions`), one value per
+   region per year, all known to the crosswalk. Map through
+   `RegionCrosswalk.apply(..., model_regions=model.regions)` and send 0.0 rather than omitting a
+   region.
+4. The sent regions are closed under the crosswalk: every destination region reached draws only
+   on regions that were sent (checked inside `apply`).
+5. A reader receives exactly its model's regions × years. Every regional handler, pre-build
+   (`NGUpdateReader`-style) and built-model (`NGModelUpdateReader`-style), calls
+   `check_region_year_keys` before writing anything.
+6. A model's update methods (e.g. `NGModel.set_external_demand`, `update_pipeline_trade`) accept
+   only keys the model carries: domestic regions it solves, international partners it trades
+   with, and years it holds. Check the whole batch first and raise on an unrecognized key; never
+   skip it. International partners are not in the crosswalk, so this is their only runtime check,
+   and an update naming a region the model doesn't include fails the run.
+
+Every check raises `ValueError`; a package that doesn't line up is an error, never a partial
+update or a silent skip. Each model checks only its own side. Region filters work in integrated
+runs only when the filtered regions are closed under the crosswalk.
+
+**Any change to these rules must also be made in the *Region Coverage Rules* section of
+`docs/run_modes/integrated.md`** (and the *Adding a Package Type* steps there, if affected), and
+vice versa, so the two stay in agreement.
+
 ### Electricity model structure
 
 - `elec_config.py` — pydantic `ElecConfig` (`region_filter`, switches for `regional_exchange` /
@@ -121,15 +153,18 @@ keeps the run going.
 - `postprocessor.py` (variable extraction / CSV export), `validators.py` (pyomo domain checks),
   `param_utilities.py` (param reshaping helpers), `utilities.py` (`annual_count` only).
 - `analysis_tools/` (top-level package) — `model_diagnostics.py`, `transmission_network.py`, `viewer.py`.
-- Input data lives under `input/electricity/` and `input/electricity/cem_inputs/`
-  (regionally/technology-indexed CSVs for costs, transmission, supply curves, etc.).
+- Input data lives under `input/electricity/`: `properties/` (region/tech set-membership CSVs,
+  `CommonConfig.common_data_path`), `parameters/` (regionally/technology-indexed CSVs for costs,
+  transmission, supply curves, etc., `ElecConfig.input_path`), and `policy/` (currently empty).
+  `datapackage.json` sits at the top of `input/electricity/`. `input/electricity_light/` mirrors
+  this layout.
 - Do not alter the formulation of the math model (constraints and objective functions) in electricity
   model code without explicitly asking to do so.
 
 ### Temporal/spatial resolution
 
 Representative days/hours (not full 8760h) drive the model's time dimension, configurable via
-`temporal_resolution` in `CommonConfig` (`"default"`, `"d8h12"`, `"d4h24"`, or custom crosswalks — see
+`temporal_resolution` in `CommonConfig` (`"default"`, `"d6h12"`, `"d4h24"`, or custom crosswalks — see
 `src/integrator/old_README.md` for the temporal mapping crosswalk format). Regions are filtered via
 `ElecConfig.region_filter`. Year aggregation (`aggregate_years`/`aggregate_start_year` in `CommonConfig`)
 lets a run represent multiple actual years with one solved representative year, weighted accordingly.
@@ -137,9 +172,31 @@ lets a run represent multiple actual years with one solved representative year, 
 ### Tests
 
 `tests/electric/conftest.py` provides four fixtures: `config_set` (a `(CommonConfig, ElecConfig)` pair
-built from `tests/electric/basic_elec_config.toml`), `learning_config_set` (the single-region
-linear-learning micro dataset under `tests/electric/test_data_linear_learning_test/`), and
-`unsolved_model` / `solved_model`, which add a `PowerModel` built via `ElectricitySequencer`.
+built from `tests/electric/basic_elec_config.toml`, for the few tests that check the shipped data
+itself), `learning_config_set` (the single-region linear-learning micro dataset under
+`tests/electric/learning/linear_micro_data/`), and the mini model's `mini_data` / `build_mini`
+(below).
+
+Learning tests live in the `tests/electric/learning/` subpackage: the shared curve
+(`test_learning_curve.py`), the linear helpers plus full runs on the micro dataset
+(`test_learning_linear.py`), and the nonlinear objective checks on the mini model
+(`test_learning_nonlinear.py`).
+
+For new tests, prefer the CSV-free **mini model** (`tests/electric/mini_model.py`) over the shipped
+data, which costs about 3 s per test to load: 2 regions (R1, R2), 2 techs (Gas, Solar), 2 years,
+2 rep days x 2 hours, and unit time weights. The base has only Gas capacity and costs, and Solar is
+declared with no data. Its `patch_loaders` monkeypatches the raw loaders, so the real `ModelSets` /
+`ParamData` / `validate_all` / sequencer run on it. To use it, take the `mini_data` fixture and
+augment it with the `MiniModelData` helpers (`add_tech`, `add_capacity`, `add_operating_costs`,
+`add_rows`, `drop_rows`, `set_buildable`, `set_load`, `every`), or with the shared augmentations in
+`mini_model.py` (`add_solar_expansion`, `add_solar_learning`, and `add_gas_ct` for a gas-fired tech).
+For non-unit time weights, edit `mini_data.cw_temporal['WeightDay']` and/or `['WeightHour']`
+before building. Then call the `build_mini(**elec_switches)` factory fixture to get
+`(sequencer, model)`; for year aggregation, also pass `summary_years` and `aggregate_start_year`
+(e.g. `summary_years=[2031], aggregate_start_year=2030` gives 2031 a year weight of 2). For
+`ParamData` alone or a `full_run`, call `patch_loaders` and `mini_configs` directly (see
+`test_update_packages.py`).
+`tests/electric/test_mini_model.py` has worked examples, including adding storage.
 
 `analysis_tools/model_diagnostics.py` has helpers (`gather_set_data`, `gather_var_data`,
 `gather_param_data`, `gather_constraint_data`, `breakdown_obj_elements`, `capacity_inspector`,
@@ -150,7 +207,8 @@ writing new inspection code when debugging a test.
 feature combinations (baseline, exchange, expansion, ramping, reserve margin) against values captured
 from a legacy run; if you intentionally change model formulation, these expected values need updating and
 the change should be justified (see the module docstring's caveat that captured values are *assumed*
-correct, not verified against an independent source).
+correct, not verified against an independent source). It holds only these full runs; learning-specific
+tests belong under `tests/electric/learning/`.
 
 ## Ignore / do not touch
 

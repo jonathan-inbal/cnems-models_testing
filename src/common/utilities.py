@@ -46,7 +46,7 @@ def get_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
 def scale_load(data_root, randomize=None, seed=None):
     """Scales the base-year load out to every model year.
 
-    Reads in BaseLoad.csv (load for all regions/hours for first year) and LoadScalar.csv (a
+    Reads in base_load.csv (load in MWh for all regions/hours for first year) and load_scalar.csv (a
     multiplier for all model years). Merges the data and multiplies the load by the scalar to
     generate new load estimates for all model years.
 
@@ -56,8 +56,10 @@ def scale_load(data_root, randomize=None, seed=None):
         dataframe that contains load for all regions/years/hours
     """
     # combine first year baseload data with scalar data for all years
-    baseload = pd.read_csv(data_root / 'BaseLoad.csv')
-    scalar = pd.read_csv(data_root / 'LoadScalar.csv')
+    baseload = pd.read_csv(data_root / 'base_load.csv').rename(columns={'base_load_mwh': 'Load'})
+    scalar = pd.read_csv(data_root / 'load_scalar.csv').rename(
+        columns={'load_scalar_frac': 'scalar'}
+    )
     scalar = randomize_annual_scalars(scalar, randomize, seed)
     df = pd.merge(scalar, baseload, how='cross')
 
@@ -79,10 +81,11 @@ def scale_load_with_enduses(
 ):
     """Scales the base-year load out to every model year using per-enduse scalars.
 
-    Reads in BaseLoad.csv (load for all regions/hours for first year), EnduseBaseShares.csv (the
-    shares of demand for each enduse in the base year) and EnduseScalar.csv (a multiplier for all
-    model years by enduse category). Merges the data and multiplies the load by the adjusted
-    enduse scalar and then sums up to new load estimates for all model years.
+    Reads in base_load.csv (load in MWh for all regions/hours for first year),
+    enduse_base_share.csv (the shares of demand for each enduse in the base year) and
+    enduse_scalar.csv (a multiplier for all model years by enduse category). Merges the data and
+    multiplies the load by the adjusted enduse scalar and then sums up to new load estimates for
+    all model years.
 
     Returns
     -------
@@ -95,10 +98,14 @@ def scale_load_with_enduses(
         logger.warning('No regions specified, returning empty Load DataFrame when scaling end uses')
         return pd.DataFrame()
     # share of total base load that is assigned to each enduse cat
-    eu = pd.read_csv(data_root / 'EnduseBaseShares.csv')
+    eu = pd.read_csv(data_root / 'enduse_base_share.csv').rename(
+        columns={'enduse_base_share_frac': 'base_year_share'}
+    )
 
     # annual incremental growth (percent of eu baseload)
-    eus = pd.read_csv(data_root / 'EnduseScalar.csv')
+    eus = pd.read_csv(data_root / 'enduse_scalar.csv').rename(
+        columns={'enduse_scalar_frac': 'increment_annual'}
+    )
     eus = randomize_enduse_increments(eus, randomize, seed)
 
     # converts the annual increment to percent of total baseload
@@ -107,7 +114,7 @@ def scale_load_with_enduses(
     eu = eu.drop(columns=['base_year_share'])
 
     # baseload total
-    load = pd.read_csv(data_root / 'BaseLoad.csv')
+    load = pd.read_csv(data_root / 'base_load.csv').rename(columns={'base_load_mwh': 'Load'})
     # convert region names to strings
     load['region'] = load['region'].astype(str)
     # filter to regions of interest
@@ -121,7 +128,7 @@ def scale_load_with_enduses(
     eu = eu.drop(columns=['Load'])
 
     # percent of enduse load for each hour
-    euh = pd.read_csv(data_root / 'EnduseShapes.csv')
+    euh = pd.read_csv(data_root / 'enduse_shape.csv').rename(columns={'enduse_shape_frac': 'share'})
 
     # converts the annual increment to an hourly increment
     eu = pd.merge(eu, euh, how='left', on=['enduse_cat'])

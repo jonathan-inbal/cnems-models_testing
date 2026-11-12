@@ -17,11 +17,13 @@ from src.common.iterative_sequencer import RunStatus
 from src.common.log_setup import setup_control_loop_logging
 from src.common.models_modes import ModelType, RunMode, resolve_models_to_run
 from src.common.utilities import get_args
+from src.integrator.gauss_seidel.gs_iterator import GaussSeidelIterator
 from src.integrator.iteration_plot import plot_objectives
 from src.integrator.jacobi.jacobi_iterator import JacobiIterator
 from src.models.electricity.elec_config import ElecConfig
 from src.models.electricity.sequencer import ElectricitySequencer
 from src.models.magic.magic_model import MagicConfig, MagicSequencer
+from src.models.magic_hsm.magic_hsm_model import MagicHSMConfig, MagicHSMSequencer
 from src.models.natural_gas.ng_config import NGConfig
 from src.models.natural_gas.sequencer import NGSequencer
 
@@ -56,11 +58,6 @@ def main(config_path: Path, debug: bool = False) -> None:
         The run config file (TOML or JSON) with a ``[common]`` section plus model sections.
     debug : bool, optional
         Debug mode; currently only sets the standalone run log to DEBUG.  False by default.
-
-    Raises
-    ------
-    NotImplementedError
-        If the config's mode is ``RunMode.INTEGRATED_GS``.
     """
     common_config, remainder = parse_config_file(config_path)
     # only an iterative run reports a run status
@@ -94,7 +91,10 @@ def main(config_path: Path, debug: bool = False) -> None:
             if PLOT_OBJECTIVES:
                 plot_objectives(results)
         case RunMode.INTEGRATED_GS:
-            raise NotImplementedError('Integrated Gauss-Seidel mode is not implemented')
+            # like Jacobi, the iterator claims the output folder and sets up its own logging
+            run_status, results = GaussSeidelIterator().run(common_config, remainder)
+            if PLOT_OBJECTIVES:
+                plot_objectives(results)
 
     finish_msg = 'Finished.' + (f'  Run status: {run_status.name}' if run_status else '')
     logger.info(finish_msg)
@@ -104,8 +104,8 @@ def main(config_path: Path, debug: bool = False) -> None:
 def _run_standalone(common_config: CommonConfig, remainder: dict) -> None:
     """Build, solve, and postprocess each model in ``models_to_run``, one after another.
 
-    ``ModelType.ALL`` expands to every production model; the dev/test MAGIC model runs only when
-    named explicitly.  Every model's config is built before any model runs, so a missing or
+    ``ModelType.ALL`` expands to every production model; the test models (``NAMED_ONLY``)
+    run only when named.  Every model's config is built before any model runs, so a missing or
     invalid config section fails the whole run up front, with each problem logged.
 
     Parameters
@@ -138,6 +138,10 @@ def _run_standalone(common_config: CommonConfig, remainder: dict) -> None:
                             MagicConfig(**remainder.get('magic_config', {})),
                             MagicSequencer(),
                         )
+                    )
+                case ModelType.MAGIC_HSM:
+                    runs.append(
+                        (model_type, MagicHSMConfig(**remainder['magic_hsm']), MagicHSMSequencer())
                     )
                 case _:
                     logger.error('No standalone run available for %s', model_type)
@@ -179,6 +183,5 @@ if __name__ == '__main__':
             'basic_elec_config',
             'exchange_elec_config',
             'reduced_elec_config',
-            'basic_ng_config',
         ):
             main(config_path=PROJECT_ROOT / 'run_configs' / f'{name}.toml', debug=args.debug)

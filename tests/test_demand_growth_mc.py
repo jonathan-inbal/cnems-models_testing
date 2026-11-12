@@ -13,28 +13,34 @@ from run_electricity_monte_carlo import extract_results
 @pytest.fixture
 def data(tmp_path):
     pd.DataFrame(
-        {'region': ['A', 'A', 'B', 'B'], 'hour': [1, 2, 1, 2], 'Load': [100.0, 300.0, 200.0, 600.0]}
-    ).to_csv(tmp_path / 'BaseLoad.csv', index=False)
-    pd.DataFrame({'year': [2023, 2030], 'scalar': [1.0, 1.2]}).to_csv(
-        tmp_path / 'LoadScalar.csv', index=False
+        {
+            'region': ['A', 'A', 'B', 'B'],
+            'hour': [1, 2, 1, 2],
+            'base_load_mwh': [100.0, 300.0, 200.0, 600.0],
+        }
+    ).to_csv(tmp_path / 'base_load.csv', index=False)
+    pd.DataFrame({'year': [2023, 2030], 'load_scalar_frac': [1.0, 1.2]}).to_csv(
+        tmp_path / 'load_scalar.csv', index=False
     )
-    pd.DataFrame({'enduse_cat': ['heat', 'other'], 'base_year_share': [0.4, 0.6]}).to_csv(
-        tmp_path / 'EnduseBaseShares.csv', index=False
-    )
+    pd.DataFrame(
+        {'enduse_cat': ['heat', 'other'], 'enduse_base_share_frac': [0.4, 0.6]}
+    ).to_csv(tmp_path / 'enduse_base_share.csv', index=False)
     pd.DataFrame(
         {
             'year': [2023, 2023, 2030, 2030],
             'enduse_cat': ['heat', 'other'] * 2,
-            'increment_annual': [0.0, 0.0, 0.3, 0.1],
+            'enduse_scalar_frac': [0.0, 0.0, 0.3, 0.1],
         }
-    ).to_csv(tmp_path / 'EnduseScalar.csv', index=False)
+    ).to_csv(
+        tmp_path / 'enduse_scalar.csv', index=False
+    )
     pd.DataFrame(
         {
             'enduse_cat': ['heat', 'heat', 'other', 'other'],
             'hour': [1, 2, 1, 2],
-            'share': [0.75, 0.25, 0.25, 0.75],
+            'enduse_shape_frac': [0.75, 0.25, 0.25, 0.75],
         }
-    ).to_csv(tmp_path / 'EnduseShapes.csv', index=False)
+    ).to_csv(tmp_path / 'enduse_shape.csv', index=False)
     return tmp_path
 
 

@@ -27,11 +27,12 @@ from src.common.update_package import (
     NG_ELEC_DEMAND_VALUE,
     NG_PRICE_INDEX,
     NG_PRICE_VALUE,
+    ExchangeSpec,
     NGElectricalDemandPackage,
     NGPricePackage,
 )
 from src.models.natural_gas.constants import UNSERVED_DEMAND_PENALTY, UNSERVED_PENALTY_TOL
-from src.models.natural_gas.data import load_base_demand
+from src.models.natural_gas.data import load_base_demand, load_qp_scalars
 from src.models.natural_gas.ng_config import NGConfig
 from src.models.natural_gas.ng_model import NGModel
 from src.models.natural_gas.postprocessor import _extract_balance
@@ -42,14 +43,13 @@ verbose = True
 # Test configurations with expected outputs, captured from a run of the current code:
 # Run Type          Total Cost ($)   Variables   Constraints
 # ----------------  ---------------  ----------  -----------
-# basic_config      -480902641083.88       1530         1530
-# partial_regions   -319146064790.54        342          342
+# basic_config      -272727069445.47       1494         1494
+# partial_regions   -227961456539.82        330          330
 #
 # dev notes:
 # 1.  unlike the electricity equivalent, these values are NOT merely assumed good.  The config
 #     runs the model at full resolution (9 census divisions x the 6 years in summary_years),
-#     which is the same case src/models/natural_gas/README.md reports a reference solve for:
-#     1530 vars / 1530 constraints.
+#     which is the same case src/models/natural_gas/README.md reports a reference solve for.
 # 2.  a negative total cost is expected, not a defect: the LNG consumer-surplus term is
 #     subtracted in the minimisation form.
 # 3.  model size scales with common_config.summary_years, the only year knob the model reads,
@@ -76,14 +76,30 @@ verbose = True
 #     until then created only for a region subset, was created for every run: 9 regions x 6
 #     years = 54 variables.  It is zero at this demand level, so the objective and the
 #     constraint count did not move, and partial_regions, which always had it, is unchanged.
+# 7.  THESE VALUES MOVED when the committed production floor QMIN was charged in the objective,
+#     at the curve's lowest price PBASE_1, so that total_cost reports the full producer cost.
+#     The term is a constant in each solve: the objectives rise by exactly that constant,
+#     208,175,571,638.41 (basic_config) and 91,184,608,250.72 (partial_regions), and no
+#     quantity, flow or price moved. The counts are unchanged.
+# 8.  The counts moved when international trade went onto (region, partner) pairs.  LNG import
+#     had been a variable and a capacity constraint for every region, capped at zero capacity
+#     where a region has no terminal; it now exists only for the pairs ng_lng_import.csv lists.
+#     basic_config drops 9 - 3 = 6 regions x 6 years = 36 of each (1530 -> 1494), and
+#     partial_regions, where only pacific imports, drops 2 x 6 = 12 (342 -> 330).  The dropped
+#     variables were pinned at zero, so the objectives did not move.
 configs = [
-    ('basic_config', -480902641083.88, 1530, 1530),
-    ('partial_regions', -319146064790.54, 342, 342),
+    ('basic_config', -272727069445.47, 1494, 1494),
+    ('partial_regions', -227961456539.82, 330, 330),
 ]
 
 # the same captured objective values, keyed by case name, so the full_run tests below pin to the
 # numbers this table already locks in rather than to a second copy of them
 expected_costs = {name: cost for name, cost, _, _ in configs}
+
+# the gas price exchange alone, with the electricity <-> natural gas crosswalk
+PRICE_EXCHANGE = ExchangeSpec.build(
+    ['NGPricePackage'], {ModelType.ELECTRICITY, ModelType.NATURAL_GAS}
+)
 
 # the three census divisions the 'partial_regions' case runs; also used by the full_run tests,
 # which want the cheapest build that still exercises the real data path
@@ -271,23 +287,38 @@ class TestSequencerFullRun:
         assert result.objective_value == pytest.approx(
             expected_costs['partial_regions'], rel=1e-4
         ), f'found {result.objective_value} total cost'
-        # C-NGMM sends its solved gas price onward, crosswalked to electricity regions.  Select
-        # by type:  the outbound list may carry other package kinds in future
-        price_packages = [p for p in result.update_packages if isinstance(p, NGPricePackage)]
-        assert len(price_packages) == 1, result.update_packages
-        package = price_packages[0]
+        # standalone, with no exchanges, nothing is sent onward
+        assert result.update_packages == []
+        # the integrator logs results with pprint(), so a broken render breaks the run report
+        assert 'natural_gas' in result.pprint()
+
+    def test_sends_crosswalked_prices(
+        self, partial_config_set: tuple[CommonConfig, NGConfig]
+    ) -> None:
+        """With the price exchange, the solved price goes onward in electricity regions.
+
+        New England and electricity region 7 (ISNE) cover each other exactly, so the run is
+        closed under the crosswalk.
+        """
+        common_config, ng_config = partial_config_set
+        ng_config.region_filter = ['new_england']
+        result = NGSequencer(PRICE_EXCHANGE).full_run(common_config, ng_config)
+
+        assert [type(p) for p in result.update_packages] == [NGPricePackage]
+        package = result.update_packages[0]
         assert package.source is ModelType.NATURAL_GAS
         assert list(package.elements.index.names) == NG_PRICE_INDEX
         prices = package.elements[NG_PRICE_VALUE]
         assert set(prices.index.get_level_values('year')) == set(common_config.summary_years)
-        assert (prices > 0).all(), 'a zero price means a demand_balance dual was not read'
-        regions = set(prices.index.get_level_values('region'))
-        # TRE ('1') sits wholly inside west_south_central, one of PARTIAL_REGIONS; ISNE ('7')
-        # sits wholly inside new_england, which this run does not solve
-        assert '1' in regions
-        assert '7' not in regions
-        # the integrator logs results with pprint(), so a broken render breaks the run report
-        assert 'natural_gas' in result.pprint()
+        assert set(prices.index.get_level_values('region')) == {'7'}
+
+    def test_unclosed_regions_raise(
+        self, partial_config_set: tuple[CommonConfig, NGConfig]
+    ) -> None:
+        """The partial divisions reach electricity regions that also draw on divisions not run."""
+        common_config, ng_config = partial_config_set
+        with pytest.raises(ValueError, match='not closed'):
+            NGSequencer(PRICE_EXCHANGE).full_run(common_config, ng_config)
 
     def test_no_objective_read_on_solve_error(
         self, partial_config_set: tuple[CommonConfig, NGConfig], monkeypatch: pytest.MonkeyPatch
@@ -323,25 +354,24 @@ class TestInboundDemandPackage:
     def test_build_applies_package_and_gates_growth(
         self, partial_config_set: tuple[CommonConfig, NGConfig]
     ) -> None:
-        """Covered entries take the package value; uncovered ones sit at base year, ungrown."""
+        """Every held entry takes the package value; the superseded sector's growth is off."""
         common_config, ng_config = partial_config_set
-        index = pd.MultiIndex.from_tuples(
-            [('west_south_central', 2030)], names=NG_ELEC_DEMAND_INDEX
-        )
+        cells = [(r, y) for r in PARTIAL_REGIONS for y in common_config.summary_years]
+        burn = {cell: 123.4 + i for i, cell in enumerate(cells)}
+        mmbtu_per_bcf = load_qp_scalars(ng_config.input_path / 'parameters')['mmbtu_per_bcf']
+        index = pd.MultiIndex.from_tuples(list(burn), names=NG_ELEC_DEMAND_INDEX)
         package = NGElectricalDemandPackage(
-            elements=pd.DataFrame({NG_ELEC_DEMAND_VALUE: [123.4]}, index=index)
+            elements=pd.DataFrame(
+                {NG_ELEC_DEMAND_VALUE: [bcf * mmbtu_per_bcf for bcf in burn.values()]},
+                index=index,
+            )
         )
-        base = load_base_demand(ng_config.input_path)
+        base = load_base_demand(ng_config.input_path / 'parameters')
 
         model = NGSequencer().build_model(common_config, ng_config, update_packages=[package])
 
-        assert value(model.demand['west_south_central', 'electric_power', 2030]) == pytest.approx(
-            123.4
-        )
-        # not covered by the package:  held flat at the 2025 base, growth gated off
-        assert value(model.demand['mountain', 'electric_power', 2030]) == pytest.approx(
-            base['mountain']['electric_power']
-        )
+        for (region, year), bcf in burn.items():
+            assert value(model.demand[region, 'electric_power', year]) == pytest.approx(bcf)
         # a sector no package supersedes still grows
         assert value(model.demand['mountain', 'industrial', 2030]) != pytest.approx(
             base['mountain']['industrial']
