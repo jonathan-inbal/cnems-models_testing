@@ -630,7 +630,76 @@ class NGModel(ConcreteModel, IntegratedModel):
         # width via supply_step_cap_con.
         self.sstep = Var(self.region_analyze, self.steps, self.year, within=NonNegativeReals)
 
+        #
+        # TEST OF Q0-SHIFT CAPACITY EXPANSION
+        #
 
+                # This ratio formulation requires a positive baseline Q0.
+        nonpositive_anchors = [
+            (r, y)
+            for r in self.region_analyze
+            for y in self.year
+            if value(self.q0[r, y]) <= 0.0
+        ]
+        if nonpositive_anchors:
+            raise ValueError(
+                f"Q0-shift expansion requires Q0 > 0: {nonpositive_anchors}"
+            )
+
+        # E[r, y]: new permanent anchor capacity built in year y, BCF/year.
+        self.capacity_expansion = Var(
+            self.region_analyze,
+            self.year,
+            within=NonNegativeReals,
+            initialize=0.0,
+        )
+
+        # One-time dollars per (BCF/year) of added Q0.
+        # Editable test coefficient; not a calibrated estimate.
+        self.capacity_expansion_unit_cost = Param(
+            self.region_analyze,
+            self.year,
+            initialize=1_500_000_000.0,
+            within=NonNegativeReals,
+            mutable=True,
+        )
+
+        # Permanent additions available by year y, including this year's build.
+        self.cumulative_expansion = Expression(
+            self.region_analyze,
+            self.year,
+            rule=lambda m, r, y: quicksum(
+                m.capacity_expansion[r, build_year]
+                for build_year in m.year
+                if build_year <= y
+            ),
+        )
+
+        # Horizontal scaling: (Q0 + accumulated expansion) / Q0.
+        self.expansion_factor = Expression(
+            self.region_analyze,
+            self.year,
+            rule=lambda m, r, y: (
+                (m.q0[r, y] + m.cumulative_expansion[r, y])
+                / m.q0[r, y]
+            ),
+        )
+
+        # Expanded breakpoints; q_base remains the baseline curve.
+        self.q_base_expanded = Expression(
+            self.region_analyze,
+            self.supply_breaks,
+            self.year,
+            rule=lambda m, r, k, y: (
+                m.expansion_factor[r, y] * m.q_base[r, k, y]
+            ),
+        )
+
+        #
+        # 
+        #
+
+        """
         # TEST OF LINEAR CAPACITY EXPANSION
 
         # Capacity added in year y, measured in BCF/year.
@@ -652,7 +721,7 @@ class NGModel(ConcreteModel, IntegratedModel):
             within=NonNegativeReals,
             mutable=True,
             )
-
+        """
 
 
 
@@ -677,6 +746,8 @@ class NGModel(ConcreteModel, IntegratedModel):
         # makes QBASE_1 the committed floor. Reading QBASE_1 here rather than QMIN keeps the
         # identity true of the curve itself rather than of an equality maintained elsewhere.
 
+
+        """
         #
         # UPDATED TOTAL PRODUCTON EXPRESSION:  Now includes capacity expansion production
         #
@@ -690,6 +761,19 @@ class NGModel(ConcreteModel, IntegratedModel):
 
         #
         # END INSERT
+        #
+        """
+
+        # changed for Q0 shift expansion
+
+        def _prod_total_rule(m, r, y):
+            return (
+            m.q_base_expanded[r, 1, y]
+            + quicksum(m.sstep[r, t, y] for t in m.steps)
+            )
+
+        #
+        # INSERT for capacity expansion Q0
         #
 
         self.production_total = Expression(self.region_analyze, self.year, rule=_prod_total_rule)
@@ -763,12 +847,18 @@ class NGModel(ConcreteModel, IntegratedModel):
         # ── CONSTRAINTS ───────────────────────────────────────────────────────
 
         # (NGMM Eq 18) Supply-curve segment range: 0 ≤ SSTEP_k ≤ QBASE_{k+1} − QBASE_k
+        
+        # altered for Q0 shift expansion
+
         def supply_step_cap_rule(m, r, t, y):
-            # TODO:  This could be "tidied up" by making steps universally either "step<x>"
-            #        or just an integer as we are constructing it two ways now...
-            k = int(t.replace('step', ''))  # segment index 1..5
-            seg_width = m.q_base[r, k + 1, y] - m.q_base[r, k, y]
+            k = int(t.replace('step', ''))
+            seg_width = (
+                m.q_base_expanded[r, k + 1, y]
+                - m.q_base_expanded[r, k, y]
+                )
             return m.sstep[r, t, y] <= seg_width
+
+        # end insert 
 
         self.supply_step_cap_con = Constraint(
             self.region_analyze,
@@ -777,6 +867,7 @@ class NGModel(ConcreteModel, IntegratedModel):
             rule=supply_step_cap_rule,
         )
 
+        """
         #
         # LINEAR CAPACITY EXPANSION CONSTRAINTS
         #
@@ -793,7 +884,7 @@ class NGModel(ConcreteModel, IntegratedModel):
             self.year,
             rule=expanded_capacity_limit_rule,
         )
-
+        """
 
         # Backward-compat: total production must not exceed Σ_k segment widths
         # plus QMIN, automatically implied by supply_step_cap above, but kept
@@ -1018,16 +1109,23 @@ class NGModel(ConcreteModel, IntegratedModel):
         # Note the k and k+1 reads inside that helper: SIX breakpoints bound FIVE segments,
         # so it spans a pair. Mixing up breakpoint and segment indexing is the classic
         # off-by-one in this formulation.
+        
+        #altered for Q0 shift expansion
+
         prod_cost = quicksum(
-            (
-                self.prod_cost_intercept[r, t, y] * self.sstep[r, t, y]
-                + 0.5 * self.prod_cost_slope[r, t, y] * self.sstep[r, t, y] * self.sstep[r, t, y]
+                (
+                    self.prod_cost_intercept[r, t, y]
+                    * self.sstep[r, t, y]
+                    + 0.5
+                    * self.prod_cost_slope[r, t, y]
+                    * self.sstep[r, t, y] ** 2
+                    / self.expansion_factor[r, y]
+                )
+                * bcf
+                for r in self.region_analyze
+                for t in self.steps
+                for y in self.year
             )
-            * bcf
-            for r in self.region_analyze
-            for t in self.steps
-            for y in self.year
-        )
 
         # 1b) Committed production, priced at the curve's lowest price PBASE_1. production_total
         #     adds QBASE_1, the committed floor QMIN, to the step volumes, but prod_cost charges
@@ -1035,11 +1133,19 @@ class NGModel(ConcreteModel, IntegratedModel):
         #     constant in any one solve and moves no quantity or price; it is here so total_cost
         #     reports the full producer cost. NGMM Eq 7 omits it. Both factors are mutable
         #     Params, so update_supply_capacity() moves this term with the curve.
+                # Minimum production grows with the expanded curve.
+        
+        # altered for Q0 shift expansion
+
+        # Minimum production grows with the expanded curve.
         committed_cost = quicksum(
-            self.p_base[r, 1, y] * self.q_base[r, 1, y] * bcf
+            self.p_base[r, 1, y]
+            * self.q_base_expanded[r, 1, y]
+            * bcf
             for r in self.region_analyze
             for y in self.year
         )
+
 
         # 2) Gathering charge (NGMM Eq 7, P^gath term)
         gathering_cost = quicksum(
@@ -1129,6 +1235,7 @@ class NGModel(ConcreteModel, IntegratedModel):
         # Only prod_cost, transport_cost and lng_consumer_surplus carry quadratic terms;
         # committed_cost is a constant and the other blocks are linear.
 
+        """
         #
         # LINEAR CAPACITY EXPANSION COSTS
         #
@@ -1136,6 +1243,14 @@ class NGModel(ConcreteModel, IntegratedModel):
         expansion_investment_cost = quicksum(
             self.capacity_expansion_unit_cost[r, y]
             * self.expanded_capacity[r, y]
+            for r in self.region_analyze
+            for y in self.year
+        )
+"""
+        # Charge each addition once, in its build year.
+        expansion_cost = quicksum(
+            self.capacity_expansion_unit_cost[r, y]
+            * self.capacity_expansion[r, y]
             for r in self.region_analyze
             for y in self.year
         )
@@ -1150,7 +1265,7 @@ class NGModel(ConcreteModel, IntegratedModel):
                 + storage_cost
                 - lng_consumer_surplus
                 + unserved_cost
-                + expansion_investment_cost
+                + expansion_cost
             ),
             sense=minimize,
         )

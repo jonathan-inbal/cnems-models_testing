@@ -72,7 +72,7 @@ def _extract_production(m: NGModel) -> pd.DataFrame:
                     )
         # QMIN floor (committed production, NGMM Eq 8)
         for y in m.year:
-            qmin = value(m.q_min[r, y])
+            qmin = value(m.q_base_expanded[r, 1, y])
             if qmin > 0.01:
                 rows.append(
                     {
@@ -83,7 +83,7 @@ def _extract_production(m: NGModel) -> pd.DataFrame:
                         'cost_per_mmbtu': value(m.p_base[r, 1, y]),
                     }
                 )
-        for y in m.year:
+        """for y in m.year:
             rows.append(
                 {
                     'region': r,
@@ -94,7 +94,7 @@ def _extract_production(m: NGModel) -> pd.DataFrame:
                     ),
                     'cost_per_mmbtu': None,
                 }
-            )
+            )"""
     return pd.DataFrame(rows)
 
 

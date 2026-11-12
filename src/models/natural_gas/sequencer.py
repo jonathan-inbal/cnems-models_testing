@@ -305,7 +305,13 @@ class NGSequencer(IntegratedModelSequencer[NGModel, NGConfig, NGData]):
         ``solver_name`` replaces it.
         """
         # TODO:  Clean up the comments on IterationStatus above
-        solver_name = kwargs.pop('solver_name', None)
+        solver_name = kwargs.pop('solver_name', None) or 'ipopt'
+        if solver_name != 'ipopt':
+            raise ValueError(
+                "The Q0-shift formulation requires the nonlinear solver: "
+                "use solver_name='ipopt'."
+            )
+        
         logger.debug('Requested solver: %s', solver_name)
         # keep the solver for later solves of this model; asking for another one replaces it
         if self._opt is None or solver_name not in (None, self._solver_name):

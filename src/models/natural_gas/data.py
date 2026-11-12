@@ -931,7 +931,7 @@ def project_demand(
     regions: list[str],
     sectors: list[str],
     superseded: Collection[str] = (),
-    growth_bump: float = 0.0,
+    growth_bump: float = 0.1,
 ) -> dict[tuple[str, str, int], float]:
     """Project sector demand for each region and year using AEO growth rates.
 

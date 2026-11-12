@@ -185,6 +185,7 @@ pandera = "*"
 universal-pathlib = "*"
 zensical = "*"
 rich = "*"
+ipopt = ">=3.14.20,<4"
 
 
 [tool.pixi.tasks]
