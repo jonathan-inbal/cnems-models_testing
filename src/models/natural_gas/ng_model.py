@@ -648,7 +648,7 @@ class NGModel(ConcreteModel, IntegratedModel):
         self.capacity_expansion_unit_cost = Param(
             self.region_analyze,
             self.year,
-            initialize=15000.0,
+            initialize=1_500_000_000.0,
             within=NonNegativeReals,
             mutable=True,
             )
